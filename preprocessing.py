@@ -294,8 +294,8 @@ def fetch_common_users_from_low_resource_domain(file_path_low_resource_domain, f
 
 def divide_low_resource_dataset_for_llm_enrichment(file_path_common_users_1, file_path_common_users_2):
     
-    df_common_users_1 = pd.read_csv(file_path_common_users_1, usecols=['user_id'])
-    df_common_users_2 = pd.read_csv(file_path_common_users_2, usecols=['user_id'])
+    df_common_users_1 = pd.read_csv(file_path_common_users_1)
+    df_common_users_2 = pd.read_csv(file_path_common_users_2)
     print(len(df_common_users_1), "entries in common users dataset 1", df_common_users_1['user_id'].nunique(), "unique users")
     print(len(df_common_users_2), "entries in common users dataset 2", df_common_users_2['user_id'].nunique(), "unique users")
     
@@ -316,7 +316,7 @@ def divide_low_resource_dataset_for_llm_enrichment(file_path_common_users_1, fil
     df_common_users_1_filtered.to_csv(os.path.join(os.path.dirname(file_path_common_users_1), 'filtered_'+os.path.basename(file_path_common_users_1)), index=False)
     df_common_users_2_filtered.to_csv(os.path.join(os.path.dirname(file_path_common_users_2), 'filtered_'+os.path.basename(file_path_common_users_2)), index=False)
     df_common_users.to_csv(os.path.join(os.path.dirname(file_path_common_users_2), 'common_users_'+os.path.basename(file_path_common_users_2)+os.path.basename(file_path_common_users_1)), index=False)
-    
+    print(df_common_users.columns)
 
 if __name__ == "__main__":
     # # Example usage of number_of_reviews function

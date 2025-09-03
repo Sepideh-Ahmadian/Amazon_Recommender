@@ -5,7 +5,10 @@ from openai import AzureOpenAI
 from dotenv import load_dotenv
 import time
 from typing import List, Dict
-
+import json
+import re
+import time
+from typing import List, Dict
 
 print("Starting Batch Review Processing...")
 
@@ -41,7 +44,7 @@ def read_reviews_from_csv(file_path: str, review_column: str = 'review', title_c
         List of dictionaries containing review and title data
     """
     try:
-        df = pd.read_csv(file_path)[:10]
+        df = pd.read_csv(file_path, nrows=50)  # Limit to first 100 rows for testing
         print(f"Loaded {len(df)} reviews from {file_path}")
         
         # Check if required columns exist
@@ -85,30 +88,31 @@ def analyze_review_batch(review_data_list: List[Dict], review_column: str = 'rev
     reviews_text = "\n\n".join(reviews_with_titles)
     
     batch_prompt = f"""
-    Analyze the following {len(review_data_list)} product reviews along with their product titles as instructed below:
-    You are an expert in customer review analysis. 
-    Your goal is to extract product aspects that customers either appreciate or criticize in digital music items (e.g., songs, albums, streaming content) sold on Amazon. 
-    This helps identify customer tastes, priorities, and perceptions of the product.
+    Analyze the following {len(review_data_list)} product reviews along with their product titles as instructed below:  
+    You are an assistant who extracts product aspects from Amazon reviews of clothing, fashion, and shoes. 
+    ### Instructions:
+    - Identify review phrases that describe product features. 
+    - For each phrase, output in this format: 
+        "<exact phrase from review>" (aspects, sentiment) 
+    - Sentiment should be **+1 for positive** and **-1 for negative**. 
+    - For each extracted aspect, add a single-word adjective that best describes it. The adjective should be chosen based on the context and the expressed sentiment.
+    - Ignore irrelevant information (seller, or unrelated experiences).
+    - Return only the product number + list of extracted features, no additional text.
+    - Ensure that all extracted features are relevant to the fashion domain.
 
-    Instructions:
-    Identify specific aspects mentioned in each review.
-    Categorize each aspect into a clear feature domain.
-    Assign sentiment polarity: +1 (positive), -1 (negative).
-    Present results in the format: Aspect Mention:(CATEGORY, SENTIMENT)
-    Example:
-    "Great sound quality but slow shipping. Amazing lyrics."
-    Output: [Great sound quality:(AUDIO_QUALITY,+1), Slow shipping:(DELIVERY_SPEED,-1), Amazing lyrics:(MUSICAL_CONTENT,+1)]
 
+    ### Example Input:
+    "These sneakers look stylish and are very comfortable, but they run a little small and the material feels cheap."
+
+
+    ### Example Output:
+    Product Number: ["look stylish" (Fashionable Appearance, +1), "very comfortable" (Comfortable Fit, +1), "run a little small" (Tight Size, -1), "material feels cheap" (Inferior Material, -1)]
+
+    ### Now extract features from the following reviews:
     {reviews_text}
     
     """
-    # Suggested Categories:
-    # AUDIO_QUALITY (recording, production, clarity)
-    # MUSICAL_CONTENT (songs, lyrics, composition)
-    # ARTIST_PERFORMANCE (vocals, how artist sounds)
-    # PACKAGING, DELIVERY_SPEED, DELIVERY_QUALITY, SERVICE_QUALITY, AUTHENTICITY, VARIETY, PRICE.
-    # Sentiment: +1 (positive), 0 (neutral), -1 (negative)
-    # Format: [Feature:(CATEGORY,sentiment), ...]
+
     try:
         response = client.chat.completions.create(
             model=DEPLOYMENT_NAME,
@@ -126,7 +130,7 @@ def analyze_review_batch(review_data_list: List[Dict], review_column: str = 'rev
         print(f"Error in API call: {e}")
         return f"Error processing batch: {str(e)}"
 
-def process_reviews_in_batches(reviews: List[Dict], batch_size: int = 10, review_column: str = 'review', title_column: str = 'title') -> List[Dict]:
+
     """
     Process reviews in batches and collect results
     
@@ -137,7 +141,7 @@ def process_reviews_in_batches(reviews: List[Dict], batch_size: int = 10, review
         title_column: Name of the column containing product titles
     
     Returns:
-        List of results with original data plus analysis
+        List of results with original data plus individual analysis for each review
     """
     results = []
     total_batches = (len(reviews) + batch_size - 1) // batch_size
@@ -163,14 +167,201 @@ def process_reviews_in_batches(reviews: List[Dict], batch_size: int = 10, review
         print(f"Processing {len(valid_batch)} valid items in batch {batch_num}")
         
         # Analyze the batch with both reviews and titles
-        analysis_result = analyze_review_batch(valid_batch, review_column, title_column)
+        # This returns a list of analysis results, one for each review in the batch
+        # batch_analysis_results = analyze_review_batch(valid_batch, review_column, title_column)
+        # print(f"Batch analysis results: {batch_analysis_results}")
+        # save_results_json(batch_analysis_results, "LLM_batch_results_temp.json")
+           
+
+        batch_analysis_results= load_results_json("LLM_batch_results_temp.json")
+        print(f"Batch analysis results: {batch_analysis_results}")
+        # Ensure we have matching number of results and reviews
+        if len(batch_analysis_results) != len(valid_batch):
+            print(f"Warning: Number of analysis results ({len(batch_analysis_results)}) doesn't match number of reviews ({len(valid_batch)})")
+            # Handle mismatch by padding with empty results or truncating
+            while len(batch_analysis_results) < len(valid_batch):
+                batch_analysis_results.append([])  # Add empty analysis
+            batch_analysis_results = batch_analysis_results[:len(valid_batch)]  # Truncate if too many
         
-        # Store results with original data
+        # Store results with original data and individual analysis
         for j, review_data in enumerate(valid_batch):
             result = review_data.copy()
             result['batch_number'] = batch_num
-            result['analysis_result'] = analysis_result
             result['review_index_in_batch'] = j + 1
+            
+            # Add the individual analysis result for this specific review
+            result['analysis_result'] = batch_analysis_results[j]
+            
+            # Optional: Parse the analysis into structured format for easier access
+            if batch_analysis_results[j]:
+                result['parsed_aspects'] = parse_analysis_result(batch_analysis_results[j])
+            else:
+                result['parsed_aspects'] = []
+            
+            results.append(result)
+        
+        # Add delay to respect rate limits
+        if batch_num < total_batches:
+            print("Waiting 2 seconds before next batch...")
+            time.sleep(2)
+    
+    return results
+def save_results_json(results: List[Dict], filename: str):
+            """Save results to JSON file"""
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(results, f, indent=2, ensure_ascii=False)
+            print(f"Results saved to {filename}")
+def load_results_json(filename: str) -> List[Dict]:
+    """Load results from JSON file"""
+    with open(filename, 'r', encoding='utf-8') as f:
+        results = json.load(f)
+    print(f"Loaded {len(results)} results from {filename}")
+    return results
+
+def parse_LLM_result_string_to_dataframe(analysis_string):
+    """
+    Parse product analysis string into a DataFrame with product_number and aspects_dict columns
+    """
+    print("DEBUG: Input string:")
+    print(repr(analysis_string))  # Use repr to see exact characters
+    print()
+    
+    product_sections = analysis_string.strip().split('\n\n')
+    print(f"DEBUG: Found {len(product_sections)} product sections")
+    results = []
+    
+    for i, section in enumerate(product_sections):
+        print(f"DEBUG: Parsing section {i+1}:")
+        print(repr(section))
+        
+        section = section.strip()
+        if not section:
+            print("DEBUG: Empty section, skipping")
+            continue
+        
+        product_match = re.match(r'Product\s+(\d+):', section)
+        if not product_match:
+            print("DEBUG: No product match found")
+            continue
+        
+        product_number = int(product_match.group(1))
+        print(f"DEBUG: Product number: {product_number}")
+        
+        bracket_match = re.search(r'\[(.*)\]', section, re.DOTALL)
+        print(f"DEBUG: Bracket match found: {bracket_match is not None}")
+        
+        if not bracket_match:
+            print("DEBUG: No bracket content found")
+            continue
+        
+        bracket_content = bracket_match.group(1)
+        print(f"DEBUG: Bracket content (first 100 chars): {repr(bracket_content[:100])}")
+        
+        # Updated regex pattern to handle optional spaces better
+        item_pattern = r'"([^"]+)"\s*\(([^,]+),\s*([+-]?\d+)\)'
+        matches = re.findall(item_pattern, bracket_content)
+        print(f"DEBUG: Found {len(matches)} matches")
+        
+        if not matches:
+            print("DEBUG: No matches found, trying alternative patterns...")
+            # Try alternative patterns for debugging
+            quotes_only = re.findall(r'"([^"]+)"', bracket_content)
+            print(f"DEBUG: Found {len(quotes_only)} quoted strings")
+            parens_only = re.findall(r'\(([^)]+)\)', bracket_content)
+            print(f"DEBUG: Found {len(parens_only)} parenthetical expressions")
+        
+        aspects_list = []
+        for text, category, sentiment in matches:
+            aspects_list.append({
+                'text': text.strip(),
+                'category': category.strip(), 
+                'sentiment': int(sentiment)
+            })
+        
+        results.append({
+            'product_number': product_number,
+            'aspects_dict': aspects_list
+        })
+        
+        print(f"DEBUG: Successfully parsed {len(aspects_list)} aspects for product {product_number}")
+        print()
+    
+    # Convert to DataFrame
+    df = pd.DataFrame(results)
+    return df
+
+def process_reviews_in_batches(reviews: List[Dict], batch_size: int = 10, review_column: str = 'review', title_column: str = 'title') -> List[Dict]:
+    """
+    Process reviews in batches and collect results
+    
+    Args:
+        reviews: List of review dictionaries
+        batch_size: Number of reviews per batch
+        review_column: Name of the column containing review text
+        title_column: Name of the column containing product titles
+    
+    Returns:
+        List of results with original data plus individual analysis for each review
+    """
+    results = []
+    total_batches = (len(reviews) + batch_size - 1) // batch_size
+    
+    for i in range(0, len(reviews), batch_size):
+        batch_num = (i // batch_size) + 1
+        print(f"Processing batch {batch_num}/{total_batches}...")
+        
+        # Get current batch
+        batch = reviews[i:i + batch_size]
+        
+        # Filter out items that don't have required columns
+        valid_batch = []
+        for item in batch:
+            if review_column in item and title_column in item:
+                if item[review_column] and item[title_column]:  # Check for non-empty values
+                    valid_batch.append(item)
+        
+        if not valid_batch:
+            print(f"No valid reviews found in batch {batch_num}")
+            continue
+        
+        print(f"Processing {len(valid_batch)} valid items in batch {batch_num}")
+        
+        # Analyze the batch with both reviews and titles
+        # This returns a list of analysis results, one for each review in the batch
+        batch_analysis_results = analyze_review_batch(valid_batch, review_column, title_column)
+        # print(f"Batch analysis results: {batch_analysis_results}")
+        # save_results_json(batch_analysis_results, "LLM_batch_results_temp.json")
+        # batch_analysis_results= load_results_json("LLM_batch_results_temp.json")
+        print(f"Batch analysis results: {batch_analysis_results}")
+        # Parse the string results into DataFrame
+        parsed_df = parse_LLM_result_string_to_dataframe(batch_analysis_results)
+        print("Parsed DataFrame:")
+        print(parsed_df)
+        print(f"Batch analysis results type: {type(batch_analysis_results)}")
+        
+        # Convert DataFrame to dictionary for easier lookup
+        parsed_dict = {}
+        for _, row in parsed_df.iterrows():
+            parsed_dict[row['product_number']] = row['aspects_dict']
+        
+        print(f"Parsed dictionary keys: {list(parsed_dict.keys())}")
+        print(f"Number of valid batch items: {len(valid_batch)}")
+        
+        # Store results with original data and individual analysis
+        for j, review_data in enumerate(valid_batch):
+            result = review_data.copy()
+            result['batch_number'] = batch_num
+            result['review_index_in_batch'] = j + 1
+            
+            # Map product number (j+1) to parsed analysis
+            product_num = j + 1
+            if product_num in parsed_dict:
+                result['analysis_result'] = parsed_dict[product_num]
+            else:
+                print(f"Warning: No analysis found for product {product_num} in batch {batch_num}")
+                result['analysis_result'] = []
+                
+            
             results.append(result)
         
         # Add delay to respect rate limits
@@ -210,8 +401,8 @@ def main():
     """Main function to orchestrate the batch processing"""
     
     # Configuration
-    input_csv_file = "Data/Beauty_and_Personal_Care/merged_and_filtered_based_on_users.csv"  # Change this to your input CSV file path
-    output_csv_file = "LLM_result_beauty_personal_care.csv"  # Output file path
+    input_csv_file = "Data/Current Doamins/All_Beauty/merged.csv"  # Change this to your input CSV file path
+    output_csv_file = "Data/LLM Output sampels/LLM_result_All_Beauty.csv"  # Output file path
     review_column_name = "review"  # Change this to match your CSV column name
     title_column_name = "product_title"   # Change this to match your CSV title column name
     batch_size = 10
@@ -220,7 +411,7 @@ def main():
         # Step 1: Read reviews and titles from CSV
         print("Step 1: Reading reviews and product titles from CSV...")
         reviews = read_reviews_from_csv(input_csv_file, review_column_name, title_column_name)
-        
+        print(f"Total reviews read: {len(reviews)}")
         if not reviews:
             print("No reviews found in the CSV file.")
             return
@@ -233,6 +424,7 @@ def main():
         # Step 2: Process reviews in batches
         print(f"Step 2: Processing {len(reviews)} reviews with titles in batches of {batch_size}...")
         results = process_reviews_in_batches(reviews, batch_size, review_column_name, title_column_name)
+       
         
         # Step 3: Save results to CSV
         print("Step 3: Saving results to CSV...")
