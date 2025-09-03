@@ -1,8 +1,16 @@
 import pandas as pd
+import traceback
 import json
 from typing import List, Union, Iterator
 import gzip
 import os
+
+""" This file contains functions for identifying common users across high-resource and low-resource domains.  
+- **fetch_common_users_from_high_resource_domain**: Extracts common users from the high-resource domain and saves them as a CSV file.  
+- **fetch_common_users_from_low_resource_domain**: Computes the common users in the low-resource domain, based on the filtered users obtained from the high-resource domain.  
+- **number_of_reviews**: Counts the number of occurrences of a specific JSON tag in a .jsonl.gz file.
+- **divide_low_resource_dataset_for_llm_enrichment**: Divides the low-resource dataset into three parts: users unique to the first dataset, users unique to the second dataset, and users common to both datasets. Each part is saved as a separate CSV file.
+"""  
 
 def number_of_reviews(file_path, tag_name):
     """
@@ -125,10 +133,7 @@ def fetch_common_users_from_high_resource_domain(folder_path_high_resource_domai
         print(f"  Total matches found: {matched_count}")
         
         if matched_count == 0:
-            print("WARNING: No matching users found! This could indicate:")
-            print("  1. No common users between the datasets")
-            print("  2. Different user_id formats")
-            print("  3. File reading issues")
+            print("WARNING: No matching users found!")
             return
         
         # Convert to DataFrame
@@ -145,7 +150,7 @@ def fetch_common_users_from_high_resource_domain(folder_path_high_resource_domai
             print("WARNING: 'title' or 'text' columns not found")
     except Exception as e:
             print(f"ERROR processing main file: {e}")
-            import traceback
+            
             traceback.print_exc()
             return
     ######################################################
@@ -205,10 +210,6 @@ def fetch_common_users_from_high_resource_domain(folder_path_high_resource_domai
             
         if meta_matched_count == 0:
             print("WARNING: No matching parent_asin found in meta file!")
-            print("This could indicate:")
-            print("  1. No common parent_asin between main and meta files")
-            print("  2. Different parent_asin formats")
-            print("  3. Meta file reading issues")
             return
             
         # Convert meta entries to DataFrame
@@ -249,8 +250,80 @@ def fetch_common_users_from_high_resource_domain(folder_path_high_resource_domai
         traceback.print_exc()
         return
         
+def fetch_common_users_from_low_resource_domain(file_path_low_resource_domain, filtered_users_file_from_high_resource):
+    """
+    Read a csv file (From a low resource domain), filter the users based on a provided CSV of user IDs, and save as CSV.
+    
+    Args:
+        file_path_low_resource_domain (str): Path to the file containing the low resource merged data
+        filtered_users_file_from_high_resource (str): Path to CSV file containing filtered user IDs of the high resource domain
+    """
+    print(f"DEBUG: Starting processing for low resource domain...")
+    print(f"DEBUG: Low resource folder: {file_path_low_resource_domain}") ## this file contains the merged data of low resource domain
+    print(f"DEBUG: Filtered users file: {filtered_users_file_from_high_resource}")
+    
+    # Check if paths exist
+    if not os.path.exists(file_path_low_resource_domain):
+        print(f"ERROR: Low resource folder does not exist: {file_path_low_resource_domain}")
+        return
+        
+    if not os.path.exists(filtered_users_file_from_high_resource):
+        print(f"ERROR: Filtered users file does not exist: {filtered_users_file_from_high_resource}")
+        return
+    # Load low resource domain data
+    print(f"Processing file: {file_path_low_resource_domain}")
+    low_resource_df = pd.read_csv(file_path_low_resource_domain)
+    
+    # Load user IDs from filtered users CSV
+    print("Loading filtered user IDs...")
+    try:
+        filtered_users_high_resource = pd.read_csv(filtered_users_file_from_high_resource, usecols=['user_id'])
+        print(f"Entries in filtered high resource dataFrame: {filtered_users_high_resource.shape[0]}")
+        user_id_unique_high_resource = set(filtered_users_high_resource['user_id'].tolist())
+        print(f"Unique user IDs in filtered high resource dataset:", len(user_id_unique_high_resource))
+        print(f"Sample user IDs: {list(user_id_unique_high_resource)[:5]}")
+    except Exception as e:
+        print(f"ERROR loading filtered users file: {e}")
+        return
+    
+    # Filter low resource file based on user IDs
+    low_resource_df_filtered = low_resource_df[low_resource_df['user_id'].isin(user_id_unique_high_resource)]
+    print(f"Low resource DataFrame shape after filtering: {low_resource_df_filtered.shape}")
+    print(len(set(low_resource_df_filtered['user_id'].tolist())), "unique users in low resource domain before filtering")
+    low_resource_df_filtered.to_csv(os.path.join(os.path.dirname(file_path_low_resource_domain), os.path.basename(file_path_low_resource_domain)+os.path.basename(filtered_users_file_from_high_resource)+'.csv'), index=False)
+
+def divide_low_resource_dataset_for_llm_enrichment(file_path_common_users_1, file_path_common_users_2):
+    
+    df_common_users_1 = pd.read_csv(file_path_common_users_1, usecols=['user_id'])
+    df_common_users_2 = pd.read_csv(file_path_common_users_2, usecols=['user_id'])
+    print(len(df_common_users_1), "entries in common users dataset 1", df_common_users_1['user_id'].nunique(), "unique users")
+    print(len(df_common_users_2), "entries in common users dataset 2", df_common_users_2['user_id'].nunique(), "unique users")
+    
+    user_df_common_users_1 = set(df_common_users_1['user_id'].tolist())
+    user_df_common_users_2 = set(df_common_users_2['user_id'].tolist())
+
+    common_users = user_df_common_users_1.intersection(user_df_common_users_2)
+    print(len(common_users), "common unique users between two datasets")
+    user_1 = user_df_common_users_1 - common_users
+    user_2 = user_df_common_users_2 - common_users
+    df_common_users_1_filtered = df_common_users_1[df_common_users_1['user_id'].isin(user_1)]
+    print(len(df_common_users_1_filtered), "entries in filtered common users dataset 1", df_common_users_1_filtered['user_id'].nunique(), "unique users")
+    df_common_users_2_filtered = df_common_users_2[df_common_users_2['user_id'].isin(user_2)]
+    print(len(df_common_users_2_filtered), "entries in filtered common users dataset 2", df_common_users_2_filtered['user_id'].nunique(), "unique users")
+    df_common_users = df_common_users_2[df_common_users_2['user_id'].isin(common_users)]
+    print(len(df_common_users), "entries in common users dataset", df_common_users['user_id'].nunique(), "unique users")
+
+    df_common_users_1_filtered.to_csv(os.path.join(os.path.dirname(file_path_common_users_1), 'filtered_'+os.path.basename(file_path_common_users_1)), index=False)
+    df_common_users_2_filtered.to_csv(os.path.join(os.path.dirname(file_path_common_users_2), 'filtered_'+os.path.basename(file_path_common_users_2)), index=False)
+    df_common_users.to_csv(os.path.join(os.path.dirname(file_path_common_users_2), 'common_users_'+os.path.basename(file_path_common_users_2)+os.path.basename(file_path_common_users_1)), index=False)
+    
+
 if __name__ == "__main__":
-    print(number_of_reviews('Data/Original main datasets/Clothing_Shoes_and_Jewelry.jsonl.gz', 'user_id'))
+    # # Example usage of number_of_reviews function
+    # print(number_of_reviews('Data/Original main datasets/Clothing_Shoes_and_Jewelry.jsonl.gz', 'user_id'))
+
+
+    # # example usage of fetch_common_users_from_high_resource_domain function
     # print("=== Amazon Reviews Processing Script ===")
     
     # # Prepare DataFrame for LLM enrichment
@@ -264,3 +337,9 @@ if __name__ == "__main__":
     # fetch_common_users_from_high_resource_domain(high_resource, low_resource)
     
     # print("=== Script completed ===")
+
+    # # example usage of fetch_common_users_from_low_resource_domain function
+    # fetch_common_users_from_low_resource_domain('Data/Current Doamins/All_Beauty/All_Beauty_merged_whole_dataset.csv','Data/Current Doamins/Clothing_Shoes_and_Jewelry/Clothing_Shoes_and_Jewelry_merged_and_filtered_based_on_users.csv')
+    
+    
+    divide_low_resource_dataset_for_llm_enrichment("Data/Current Doamins/All_Beauty/All_Beauty_Beauty_and_Personal_Care_common_users.csv", 'Data/Current Doamins/All_Beauty/All_Beauty_Clothing_Shoes_and_Jewelry_common_users.csv')
