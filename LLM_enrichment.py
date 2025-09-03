@@ -31,7 +31,7 @@ client = AzureOpenAI(
     azure_endpoint=AZURE_OPENAI_ENDPOINT
 )
 
-def read_reviews_from_csv(file_path: str, review_column: str = 'review', title_column: str = 'title') -> List[Dict]:
+def read_reviews_from_csv(file_path: str, review_column: str = 'review', title_column: str = 'product_title') -> List[Dict]:
     """
     Read reviews and titles from a CSV file
     
@@ -44,7 +44,7 @@ def read_reviews_from_csv(file_path: str, review_column: str = 'review', title_c
         List of dictionaries containing review and title data
     """
     try:
-        df = pd.read_csv(file_path, nrows=50)  # Limit to first 100 rows for testing
+        df = pd.read_csv(file_path) 
         print(f"Loaded {len(df)} reviews from {file_path}")
         
         # Check if required columns exist
