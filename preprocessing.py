@@ -250,16 +250,17 @@ def fetch_common_users_from_high_resource_domain(folder_path_high_resource_domai
         return
         
 if __name__ == "__main__":
-    print("=== Amazon Reviews Processing Script ===")
+    print(number_of_reviews('Data/Original main datasets/Clothing_Shoes_and_Jewelry.jsonl.gz', 'user_id'))
+    # print("=== Amazon Reviews Processing Script ===")
     
-    # Prepare DataFrame for LLM enrichment
-    high_resource = 'Data/Beauty_and_Personal_Care/'
-    low_resource = 'Data/All_Beauty/All_Beauty.jsonl'
+    # # Prepare DataFrame for LLM enrichment
+    # high_resource = 'Data/Clothing_Shoes_and_Jewelry/'
+    # low_resource = 'Data/All_Beauty/All_Beauty.jsonl'
     
-    print(f"Starting processing with:")
-    print(f"  High resource domain: {high_resource}")
-    print(f"  Low resource domain: {low_resource}")
+    # print(f"Starting processing with:")
+    # print(f"  High resource domain: {high_resource}")
+    # print(f"  Low resource domain: {low_resource}")
     
-    fetch_common_users_from_high_resource_domain(high_resource, low_resource)
+    # fetch_common_users_from_high_resource_domain(high_resource, low_resource)
     
-    print("=== Script completed ===")
+    # print("=== Script completed ===")
