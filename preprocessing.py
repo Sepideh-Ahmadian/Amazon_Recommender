@@ -317,6 +317,8 @@ def divide_low_resource_dataset_for_llm_enrichment(file_path_common_users_1, fil
     df_common_users_2_filtered.to_csv(os.path.join(os.path.dirname(file_path_common_users_2), 'filtered_'+os.path.basename(file_path_common_users_2)), index=False)
     df_common_users.to_csv(os.path.join(os.path.dirname(file_path_common_users_2), 'common_users_'+os.path.basename(file_path_common_users_2)+os.path.basename(file_path_common_users_1)), index=False)
     print(df_common_users.columns)
+    df_common_users['review_len']=df_common_users["review"].apply(lambda x: len(x.split()))
+    print(df_common_users['review_len'].describe().mean()*len(df_common_users), "total tokens in common users dataset")
 
 if __name__ == "__main__":
     # # Example usage of number_of_reviews function

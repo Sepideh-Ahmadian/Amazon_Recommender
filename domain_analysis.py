@@ -84,7 +84,7 @@ def find_top_n_candidates(matrix, array, min_value_intersection=50, top_n=10):
 
 # Example usage
 if __name__ == "__main__":
-    df=pd.read_csv('/Users/sepide/Projects/amazon-reviews-analysis/Data/Intersection results/intersections.csv', header=None)
+    df=pd.read_csv('Data/Intersection results/intersections.csv', header=None)
     dataset_lenghts = extract_diagonal(df.to_numpy())
 
     df_intersection_ratio = pd.read_csv('/Users/sepide/Projects/amazon-reviews-analysis/Data/Intersection results/Row_Normalized_Matrix_Percentage_.csv', header=None)

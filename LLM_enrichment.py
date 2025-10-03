@@ -9,6 +9,8 @@ import json
 import re
 import time
 from typing import List, Dict
+from Database import SQLiteManager
+from datetime import datetime
 
 print("Starting Batch Review Processing...")
 
@@ -31,42 +33,8 @@ client = AzureOpenAI(
     azure_endpoint=AZURE_OPENAI_ENDPOINT
 )
 
-def read_reviews_from_csv(file_path: str, review_column: str = 'review', title_column: str = 'product_title') -> List[Dict]:
-    """
-    Read reviews and titles from a CSV file
-    
-    Args:
-        file_path: Path to the CSV file
-        review_column: Name of the column containing reviews
-        title_column: Name of the column containing product titles
-    
-    Returns:
-        List of dictionaries containing review and title data
-    """
-    try:
-        df = pd.read_csv(file_path) 
-        print(f"Loaded {len(df)} reviews from {file_path}")
-        
-        # Check if required columns exist
-        missing_columns = []
-        if review_column not in df.columns:
-            missing_columns.append(review_column)
-        if title_column not in df.columns:
-            missing_columns.append(title_column)
-        
-        if missing_columns:
-            print(f"Available columns: {list(df.columns)}")
-            raise ValueError(f"Columns {missing_columns} not found in CSV file")
-        
-        # Convert to list of dictionaries
-        reviews = df.to_dict('records')
-        return reviews
-    
-    except Exception as e:
-        print(f"Error reading CSV file: {e}")
-        raise
 
-def analyze_review_batch(review_data_list: List[Dict], review_column: str = 'review', title_column: str = 'title') -> str:
+def analyze_review_batch(batch_size: int) -> str:
     """
     Send a batch of reviews with product titles to the LLM for analysis
     
@@ -79,39 +47,47 @@ def analyze_review_batch(review_data_list: List[Dict], review_column: str = 'rev
         Analysis result string
     """
     # Create a formatted text with both titles and reviews
-    reviews_with_titles = []
-    for i, item in enumerate(review_data_list):
-        title = item.get(title_column, "N/A")
-        review = item.get(review_column, "N/A")
-        reviews_with_titles.append(f"Product {i+1}: {title}\nReview {i+1}: {review}")
-    
-    reviews_text = "\n\n".join(reviews_with_titles)
+    importer = SQLiteManager("Amazon_Review.db")
+    reviews = importer.fetch_data_for_llm_enrichment("Clothing_Common_Users", "meta_Clothing_Shoes_and_Jewelry", batch_size= batch_size)
+    rowid_list =[]
+    reviews_text_list = []
+    for review in reviews:
+        rowid_list.append(review[0])
+        reviews_text_list.append(str(review[0])+": "+review[1])
+
+    reviews_text = "\n\n".join(reviews_text_list)
+    print(f"DEBUG: Reviews text for batch (first 500 chars): {repr(reviews_text[:500])}")
     
     batch_prompt = f"""
-    Analyze the following {len(review_data_list)} product reviews along with their product titles as instructed below:  
-    You are an assistant who extracts product aspects from Amazon reviews of clothing, fashion, and shoes. 
-    ### Instructions:
-    - Identify review phrases that describe product features. 
-    - For each phrase, output in this format: 
-        "<exact phrase from review>" (aspects, sentiment) 
-    - Sentiment should be **+1 for positive** and **-1 for negative**. 
-    - For each extracted aspect, add a single-word adjective that best describes it. The adjective should be chosen based on the context and the expressed sentiment.
-    - Ignore irrelevant information (seller, or unrelated experiences).
-    - Return only the product number + list of extracted features, no additional text.
-    - Ensure that all extracted features are relevant to the fashion domain.
+        Analyze the following {len(reviews_text)} product reviews for aspect-based sentiment analysis: 
+
+        -TASK: Extract exact phrases that describe product features, performance, or user experience. Use the product title provided after "##" in each review if more context is needed. Each review starts with an ID number — keep the same ID in the output.
+
+        -OUTPUT FORMAT:
+        For each review, return the following list:[ReviewID, ["<exact phrase>": (AspectLabel, sentiment_score), ...]]
+
+                -Sentiment score: float between -1.0 (negative) and +1.0 (positive)
+                -AspectLabel: one adjective + one noun summarizing the aspect (e.g., Comfortable Fit, Inferior Material)
+                -Only extract phrases directly related to the product itself
+                -If no product aspects are found, return an empty list for that review
+
+        EXAMPLE:
+        Input:
+        1: These sneakers look stylish and are very comfortable, but they run a little small, and the material feels cheap. ## Nike Jordan sneakers
+
+        Output:
+        [1, ["look stylish": (Fashionable Appearance, +1), "very comfortable": (Comfortable Fit, +1), "run a little small": (Tight Size, -1), "material feels cheap": (Inferior Material, -1)]]
+
+        REQUIREMENTS:
+        -Process only English reviews
+        -Extract only product-related aspects (ignore shipping, packaging, seller, etc.)
+        -Return review ID + extracted features only in json format (no extra commentary)
+        -Apply only to reviews in the clothing and fashion domain
 
 
-    ### Example Input:
-    "These sneakers look stylish and are very comfortable, but they run a little small and the material feels cheap."
+        {reviews_text}
 
-
-    ### Example Output:
-    Product Number: ["look stylish" (Fashionable Appearance, +1), "very comfortable" (Comfortable Fit, +1), "run a little small" (Tight Size, -1), "material feels cheap" (Inferior Material, -1)]
-
-    ### Now extract features from the following reviews:
-    {reviews_text}
-    
-    """
+        """
 
     try:
         response = client.chat.completions.create(
@@ -120,92 +96,17 @@ def analyze_review_batch(review_data_list: List[Dict], review_column: str = 'rev
                 {"role": "system", "content": "You are an expert in analyzing customer reviews and product information, extracting key product aspects while considering both the product name and customer feedback."},
                 {"role": "user", "content": batch_prompt}
             ],
-            max_tokens=4000,
+            max_completion_tokens =4000,
             temperature=0.1
         )
-        
-        return response.choices[0].message.content
+        print(f"DEBUG: LLM response (first 500 chars): {repr(response.choices[0].message.content[:500])}")
+        save_results_json(response.choices[0].message.content, "Output/LLM_response "+str(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))+".json")
+        return response.choices[0].message.content, rowid_list
     
     except Exception as e:
         print(f"Error in API call: {e}")
-        return f"Error processing batch: {str(e)}"
+        return f"Error processing batch: {str(e)}", rowid_list
 
-
-    """
-    Process reviews in batches and collect results
-    
-    Args:
-        reviews: List of review dictionaries
-        batch_size: Number of reviews per batch
-        review_column: Name of the column containing review text
-        title_column: Name of the column containing product titles
-    
-    Returns:
-        List of results with original data plus individual analysis for each review
-    """
-    results = []
-    total_batches = (len(reviews) + batch_size - 1) // batch_size
-    
-    for i in range(0, len(reviews), batch_size):
-        batch_num = (i // batch_size) + 1
-        print(f"Processing batch {batch_num}/{total_batches}...")
-        
-        # Get current batch
-        batch = reviews[i:i + batch_size]
-        
-        # Filter out items that don't have required columns
-        valid_batch = []
-        for item in batch:
-            if review_column in item and title_column in item:
-                if item[review_column] and item[title_column]:  # Check for non-empty values
-                    valid_batch.append(item)
-        
-        if not valid_batch:
-            print(f"No valid reviews found in batch {batch_num}")
-            continue
-        
-        print(f"Processing {len(valid_batch)} valid items in batch {batch_num}")
-        
-        # Analyze the batch with both reviews and titles
-        # This returns a list of analysis results, one for each review in the batch
-        # batch_analysis_results = analyze_review_batch(valid_batch, review_column, title_column)
-        # print(f"Batch analysis results: {batch_analysis_results}")
-        # save_results_json(batch_analysis_results, "LLM_batch_results_temp.json")
-           
-
-        batch_analysis_results= load_results_json("LLM_batch_results_temp.json")
-        print(f"Batch analysis results: {batch_analysis_results}")
-        # Ensure we have matching number of results and reviews
-        if len(batch_analysis_results) != len(valid_batch):
-            print(f"Warning: Number of analysis results ({len(batch_analysis_results)}) doesn't match number of reviews ({len(valid_batch)})")
-            # Handle mismatch by padding with empty results or truncating
-            while len(batch_analysis_results) < len(valid_batch):
-                batch_analysis_results.append([])  # Add empty analysis
-            batch_analysis_results = batch_analysis_results[:len(valid_batch)]  # Truncate if too many
-        
-        # Store results with original data and individual analysis
-        for j, review_data in enumerate(valid_batch):
-            result = review_data.copy()
-            result['batch_number'] = batch_num
-            result['review_index_in_batch'] = j + 1
-            
-            # Add the individual analysis result for this specific review
-            result['analysis_result'] = batch_analysis_results[j]
-            
-            # Optional: Parse the analysis into structured format for easier access
-            if batch_analysis_results[j]:
-                result['parsed_aspects'] = parse_analysis_result(batch_analysis_results[j])
-            else:
-                result['parsed_aspects'] = []
-            
-            results.append(result)
-        
-        # Add delay to respect rate limits
-        if batch_num < total_batches:
-            print("Waiting 2 seconds before next batch...")
-            time.sleep(2)
-    
-    return results
 def save_results_json(results: List[Dict], filename: str):
             """Save results to JSON file"""
             with open(filename, 'w', encoding='utf-8') as f:
@@ -218,230 +119,236 @@ def load_results_json(filename: str) -> List[Dict]:
     print(f"Loaded {len(results)} results from {filename}")
     return results
 
-def parse_LLM_result_string_to_dataframe(analysis_string):
+def parse_llm_response(response_string):
     """
-    Parse product analysis string into a DataFrame with product_number and aspects_dict columns
-    """
-    print("DEBUG: Input string:")
-    print(repr(analysis_string))  # Use repr to see exact characters
-    print()
-    
-    product_sections = analysis_string.strip().split('\n\n')
-    print(f"DEBUG: Found {len(product_sections)} product sections")
-    results = []
-    
-    for i, section in enumerate(product_sections):
-        print(f"DEBUG: Parsing section {i+1}:")
-        print(repr(section))
-        
-        section = section.strip()
-        if not section:
-            print("DEBUG: Empty section, skipping")
-            continue
-        
-        product_match = re.match(r'Product\s+(\d+):', section)
-        if not product_match:
-            print("DEBUG: No product match found")
-            continue
-        
-        product_number = int(product_match.group(1))
-        print(f"DEBUG: Product number: {product_number}")
-        
-        bracket_match = re.search(r'\[(.*)\]', section, re.DOTALL)
-        print(f"DEBUG: Bracket match found: {bracket_match is not None}")
-        
-        if not bracket_match:
-            print("DEBUG: No bracket content found")
-            continue
-        
-        bracket_content = bracket_match.group(1)
-        print(f"DEBUG: Bracket content (first 100 chars): {repr(bracket_content[:100])}")
-        
-        # Updated regex pattern to handle optional spaces better
-        item_pattern = r'"([^"]+)"\s*\(([^,]+),\s*([+-]?\d+)\)'
-        matches = re.findall(item_pattern, bracket_content)
-        print(f"DEBUG: Found {len(matches)} matches")
-        
-        if not matches:
-            print("DEBUG: No matches found, trying alternative patterns...")
-            # Try alternative patterns for debugging
-            quotes_only = re.findall(r'"([^"]+)"', bracket_content)
-            print(f"DEBUG: Found {len(quotes_only)} quoted strings")
-            parens_only = re.findall(r'\(([^)]+)\)', bracket_content)
-            print(f"DEBUG: Found {len(parens_only)} parenthetical expressions")
-        
-        aspects_list = []
-        for text, category, sentiment in matches:
-            aspects_list.append({
-                'text': text.strip(),
-                'category': category.strip(), 
-                'sentiment': int(sentiment)
-            })
-        
-        results.append({
-            'product_number': product_number,
-            'aspects_dict': aspects_list
-        })
-        
-        print(f"DEBUG: Successfully parsed {len(aspects_list)} aspects for product {product_number}")
-        print()
-    
-    # Convert to DataFrame
-    df = pd.DataFrame(results)
-    return df
-
-def process_reviews_in_batches(reviews: List[Dict], batch_size: int = 10, review_column: str = 'review', title_column: str = 'title') -> List[Dict]:
-    """
-    Process reviews in batches and collect results
-    
-    Args:
-        reviews: List of review dictionaries
-        batch_size: Number of reviews per batch
-        review_column: Name of the column containing review text
-        title_column: Name of the column containing product titles
+    Parse LLM response string that contains JSON formatted data with Python tuple syntax.
+    Handles empty results gracefully.
     
     Returns:
-        List of results with original data plus individual analysis for each review
+        tuple: (parsed_results, success_flag)
+            - parsed_results: list of tuples (review_id, aspects_str)
+            - success_flag: boolean indicating if parsing was successful
     """
-    results = []
-    total_batches = (len(reviews) + batch_size - 1) // batch_size
+    print("Response String:", response_string[:200] + "..." if len(response_string) > 200 else response_string)
     
-    for i in range(0, len(reviews), batch_size):
-        batch_num = (i // batch_size) + 1
-        print(f"Processing batch {batch_num}/{total_batches}...")
-        
-        # Get current batch
-        batch = reviews[i:i + batch_size]
-        
-        # Filter out items that don't have required columns
-        valid_batch = []
-        for item in batch:
-            if review_column in item and title_column in item:
-                if item[review_column] and item[title_column]:  # Check for non-empty values
-                    valid_batch.append(item)
-        
-        if not valid_batch:
-            print(f"No valid reviews found in batch {batch_num}")
-            continue
-        
-        print(f"Processing {len(valid_batch)} valid items in batch {batch_num}")
-        
-        # Analyze the batch with both reviews and titles
-        # This returns a list of analysis results, one for each review in the batch
-        batch_analysis_results = analyze_review_batch(valid_batch, review_column, title_column)
-        # print(f"Batch analysis results: {batch_analysis_results}")
-        # save_results_json(batch_analysis_results, "LLM_batch_results_temp.json")
-        # batch_analysis_results= load_results_json("LLM_batch_results_temp.json")
-        print(f"Batch analysis results: {batch_analysis_results}")
-        # Parse the string results into DataFrame
-        parsed_df = parse_LLM_result_string_to_dataframe(batch_analysis_results)
-        print("Parsed DataFrame:")
-        print(parsed_df)
-        print(f"Batch analysis results type: {type(batch_analysis_results)}")
-        
-        # Convert DataFrame to dictionary for easier lookup
-        parsed_dict = {}
-        for _, row in parsed_df.iterrows():
-            parsed_dict[row['product_number']] = row['aspects_dict']
-        
-        print(f"Parsed dictionary keys: {list(parsed_dict.keys())}")
-        print(f"Number of valid batch items: {len(valid_batch)}")
-        
-        # Store results with original data and individual analysis
-        for j, review_data in enumerate(valid_batch):
-            result = review_data.copy()
-            result['batch_number'] = batch_num
-            result['review_index_in_batch'] = j + 1
-            
-            # Map product number (j+1) to parsed analysis
-            product_num = j + 1
-            if product_num in parsed_dict:
-                result['analysis_result'] = parsed_dict[product_num]
-            else:
-                print(f"Warning: No analysis found for product {product_num} in batch {batch_num}")
-                result['analysis_result'] = []
-                
-            
-            results.append(result)
-        
-        # Add delay to respect rate limits
-        if batch_num < total_batches:
-            print("Waiting 2 seconds before next batch...")
-            time.sleep(2)
+    # Handle empty or None responses
+    if not response_string or response_string.strip() == "":
+        print("Empty response string received.")
+        return [], False
     
-    return results
-
-def save_results_to_csv(results: List[Dict], output_file: str):
-    """
-    Save results to a CSV file
-    
-    Args:
-        results: List of result dictionaries
-        output_file: Path for output CSV file
-    """
     try:
-        df = pd.DataFrame(results)
-        df.to_csv(output_file, index=False)
-        print(f"Results saved to {output_file}")
-        print(f"Total records saved: {len(results)}")
+        # Clean the response - remove ```json and ``` markers if present
+        cleaned_response = response_string.strip()
+        if cleaned_response.startswith('```json'):
+            cleaned_response = cleaned_response[7:]
+        if cleaned_response.startswith('```'):
+            cleaned_response = cleaned_response[3:]
+        if cleaned_response.endswith('```'):
+            cleaned_response = cleaned_response[:-3]
         
-        # Print sample of what was processed
-        if len(results) > 0:
-            print("\nSample of processed data:")
-            sample = results[0]
-            print(f"Product Title: {sample.get('title', 'N/A')}")
-            print(f"Review: {sample.get('review', 'N/A')[:100]}...")
-            print(f"Analysis: {sample.get('analysis_result', 'N/A')[:100]}...")
+        cleaned_response = cleaned_response.strip()
+        
+        # Fix Python tuple syntax to JSON array syntax
+        # Convert (Category, score) to ["Category", score]
+        cleaned_response = re.sub(r'\(([^,]+),\s*([^)]+)\)', r'["\1", \2]', cleaned_response)
+        
+        # Parse JSON
+        json_data = json.loads(cleaned_response)
+        
+        parsed_results = []
+        
+        # Handle the JSON structure: [[id, [aspects]], [id, [aspects]], ...]
+        for item in json_data:
+            if isinstance(item, list) and len(item) >= 2:
+                review_id = item[0]
+                aspects_data = item[1]
+                
+                # Handle empty aspects list
+                if not aspects_data or aspects_data == [] or aspects_data == "[]":
+                    parsed_results.append((review_id, "[]"))
+                    continue
+                
+                # Convert aspects to string format for compatibility
+                if isinstance(aspects_data, list):
+                    # Reconstruct the original format for your database
+                    formatted_aspects = []
+                    for aspect in aspects_data:
+                        if isinstance(aspect, dict) and len(aspect) == 1:
+                            # Extract phrase and (category, score)
+                            phrase = list(aspect.keys())[0]
+                            category_score = aspect[phrase]
+                            if isinstance(category_score, list) and len(category_score) == 2:
+                                formatted_aspects.append(f'"{phrase}": ({category_score[0]}, {category_score[1]})')
+                    
+                    aspects_str = "[" + ", ".join(formatted_aspects) + "]" if formatted_aspects else "[]"
+                    parsed_results.append((review_id, aspects_str))
+                else:
+                    parsed_results.append((review_id, str(aspects_data)))
+        
+        print(f"Successfully parsed JSON format with {len(parsed_results)} items")
+        return parsed_results, True
+        
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"JSON parsing failed: {e}")
+        
+        # Alternative approach: Extract data using regex patterns
+        try:
+            parsed_results = []
+            
+            # Find all review blocks: [number, [aspects]] including empty ones
+            # Updated pattern to capture empty brackets
+            pattern = r'\[(\d+),\s*(\[.*?\])\s*\]'
+            matches = re.findall(pattern, response_string, re.DOTALL)
+            
+            for match in matches:
+                review_id = int(match[0])
+                aspects_text = match[1].strip()
+                
+                # Check if aspects are empty
+                if aspects_text == "[]" or aspects_text.strip() == "[]":
+                    parsed_results.append((review_id, "[]"))
+                else:
+                    # Clean up the aspects text and format it
+                    # Remove outer brackets, clean, then re-add
+                    inner_text = aspects_text[1:-1].strip()
+                    formatted_aspects = f"[{inner_text}]" if inner_text else "[]"
+                    parsed_results.append((review_id, formatted_aspects))
+            
+            if parsed_results:
+                print(f"Successfully parsed using regex with {len(parsed_results)} items")
+                print(f"print len parsed {len(parsed_results)}")
+                if parsed_results:
+                    print(f"Final parsed response example: {parsed_results[1]}")
+                    
+                    
+                return parsed_results, True
+            else:
+                print("Regex parsing also failed - no matches found")
+                return [], False
+                
+        except Exception as regex_error:
+            print(f"Regex parsing failed: {regex_error}")
+            return [], False
+
+def parse_llm_response1(response_string):
+    """
+    Parse LLM response string that contains JSON formatted data with Python tuple syntax.
+    """
+    print("Response String:", response_string[:200] + "..." if len(response_string) > 200 else response_string)
     
-    except Exception as e:
-        print(f"Error saving results: {e}")
-        raise
+    if response_string == "":
+        print("Empty response string received.")
+        return [], True
+    
+    try:
+        # Clean the response - remove ```json and ``` markers if present
+        cleaned_response = response_string.strip()
+        if cleaned_response.startswith('```json'):
+            cleaned_response = cleaned_response[7:]  # Remove ```json
+        if cleaned_response.endswith('```'):
+            cleaned_response = cleaned_response[:-3]  # Remove ```
+        
+        # Fix Python tuple syntax to JSON array syntax
+        # Convert (Category, score) to ["Category", score]
+        cleaned_response = re.sub(r'\(([^,]+),\s*([^)]+)\)', r'["\1", \2]', cleaned_response)
+        
+        # Parse JSON
+        json_data = json.loads(cleaned_response.strip())
+        
+        parsed_results = []
+        
+        # Handle the JSON structure: [[id, [aspects]], [id, [aspects]], ...]
+        for item in json_data:
+            if isinstance(item, list) and len(item) >= 2:
+                review_id = item[0]
+                aspects_data = item[1]
+                
+                # Convert aspects to string format for compatibility
+                if isinstance(aspects_data, list):
+                    # Reconstruct the original format for your database
+                    formatted_aspects = []
+                    for aspect in aspects_data:
+                        if isinstance(aspect, dict) and len(aspect) == 1:
+                            # Extract phrase and (category, score)
+                            phrase = list(aspect.keys())[0]
+                            category_score = aspect[phrase]
+                            if isinstance(category_score, list) and len(category_score) == 2:
+                                formatted_aspects.append(f'"{phrase}" ({category_score[0]}, {category_score[1]})')
+                    
+                    aspects_str = "[" + ", ".join(formatted_aspects) + "]"
+                    parsed_results.append((review_id, aspects_str))
+                else:
+                    parsed_results.append((review_id, str(aspects_data)))
+        
+        print(f"Successfully parsed JSON format with {len(parsed_results)} items")
+        if len(parsed_results) ==0:
+            return []
+        else:
+            return parsed_results
+        
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"JSON parsing failed: {e}")
+        
+        # Alternative approach: Extract data using regex patterns
+        try:
+            parsed_results = []
+            
+            # Find all review blocks: [number, [aspects]]
+            pattern = r'\[(\d+),\s*\[(.*?)\]\]'
+            matches = re.findall(pattern, cleaned_response, re.DOTALL)
+            
+            for match in matches:
+                review_id = int(match[0])
+                aspects_text = match[1].strip()
+                
+                # Clean up the aspects text and format it
+                formatted_aspects = f"[{aspects_text}]"
+                parsed_results.append((review_id, formatted_aspects))
+            
+            if parsed_results:
+                print(f"Successfully parsed using regex with {len(parsed_results)} items")
+                return parsed_results, True
+            else:
+                print("Regex parsing also failed")
+                return [], False
+                
+        except Exception as regex_error:
+            print(f"Regex parsing failed: {regex_error}")
+            return [], False
+
 
 def main():
-    """Main function to orchestrate the batch processing"""
-    
-    # Configuration
-    input_csv_file = "Data/Current Doamins/All_Beauty/merged.csv"  # Change this to your input CSV file path
-    output_csv_file = "Data/LLM Output sampels/LLM_result_All_Beauty.csv"  # Output file path
-    review_column_name = "review"  # Change this to match your CSV column name
-    title_column_name = "product_title"   # Change this to match your CSV title column name
-    batch_size = 10
-    
-    try:
-        # Step 1: Read reviews and titles from CSV
-        print("Step 1: Reading reviews and product titles from CSV...")
-        reviews = read_reviews_from_csv(input_csv_file, review_column_name, title_column_name)
-        print(f"Total reviews read: {len(reviews)}")
-        if not reviews:
-            print("No reviews found in the CSV file.")
+    for item in range(34000):
+        print("This is batch number ",str(item)," ",datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        llm_response, row_id = analyze_review_batch(10)
+        #print("Row ids are as follows: ",row_id)
+        #llm_response= load_results_json('Output/LLM_response 2025-09-29 10:28:55.json')
+        #row_id = [2801920, 2801940,2801960, 2801980, 2802000, 2802020, 2802040, 1638440,  1638460, 1638480]
+        if llm_response == []:
+            print("No response from the LLM!", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
             return
-        
-        # Print info about what we're processing
-        sample_review = reviews[0] if reviews else {}
-        print(f"Sample product title: {sample_review.get(title_column_name, 'N/A')}")
-        print(f"Sample review: {sample_review.get(review_column_name, 'N/A')[:100]}...")
-        
-        # Step 2: Process reviews in batches
-        print(f"Step 2: Processing {len(reviews)} reviews with titles in batches of {batch_size}...")
-        results = process_reviews_in_batches(reviews, batch_size, review_column_name, title_column_name)
+            
+           
+        else:
+            #llm_response = load_results_json("result_results.json")
+            parsed_reponse = parse_llm_response(llm_response)
+            parsed_reponse=parsed_reponse[0]
+            response_index = [t[0] for t in parsed_reponse]
+            print("print len parsed",len(parsed_reponse))
+            if set(response_index) != set(row_id):
+                print("Mismatch between response indices and row IDs.")
+                for index in  set(row_id) - set(response_index):
+                    parsed_reponse.append((index, "No response from LLM!"))
+                print("mismatch indexes are as follows: ",set(row_id) - set(response_index))
+            parsed_reponse.sort(key=lambda x: x[0])  # Sort by rowid
+            print(f"Final parsed response example: {parsed_reponse[0]}")
+            print("lenght of final response: ", len(parsed_reponse))
+            importer = SQLiteManager("Amazon_Review.db")
+            importer.update_table_column("Clothing_Common_Users", "llm_enrichment", parsed_reponse)
+        # time.sleep(2)    
        
-        
-        # Step 3: Save results to CSV
-        print("Step 3: Saving results to CSV...")
-        save_results_to_csv(results, output_csv_file)
-        
-        print("########################################################")
-        print("Batch processing completed successfully!")
-        print(f"Input file: {input_csv_file}")
-        print(f"Output file: {output_csv_file}")
-        print(f"Total reviews processed: {len(reviews)}")
-        print(f"Batch size: {batch_size}")
-        print(f"Review column: {review_column_name}")
-        print(f"Title column: {title_column_name}")
-        
-    except Exception as e:
-        print(f"Error in main execution: {e}")
-        raise
+       
 
 if __name__ == "__main__":
     main()
+    
